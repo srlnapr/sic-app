@@ -48,6 +48,17 @@ class TemperatureChart extends StatelessWidget {
 
         final showCount = history.length.clamp(2, 100);
 
+        double minY = FishThresholds.chartMinY;
+        double maxY = FishThresholds.chartMaxY;
+        for (final item in history) {
+          if (item.temperature > maxY - 2) {
+            maxY = (item.temperature + 4).ceilToDouble();
+          }
+          if (item.temperature < minY + 2) {
+            minY = (item.temperature - 4).floorToDouble();
+          }
+        }
+
         return Container(
           decoration: AppTheme.cardDecoration(),
           padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
@@ -57,8 +68,8 @@ class TemperatureChart extends StatelessWidget {
               LineChartData(
                 minX: 0,
                 maxX: (showCount - 1).toDouble(),
-                minY: FishThresholds.chartMinY,
-                maxY: FishThresholds.chartMaxY,
+                minY: minY,
+                maxY: maxY,
                 clipData: const FlClipData.all(),
                 gridData: FlGridData(
                   show: true,
@@ -112,7 +123,7 @@ class TemperatureChart extends StatelessWidget {
                 ),
                 extraLinesData: ExtraLinesData(
                   horizontalLines: [
-                    // Normal threshold line
+                    // Normal boundary line (0°C)
                     HorizontalLine(
                       y: FishThresholds.normalMax,
                       color: AppColors.statusNormal.withValues(alpha: 0.7),
@@ -127,13 +138,13 @@ class TemperatureChart extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                         labelResolver: (_) =>
-                            'Normal ≤${FishThresholds.normalMax.toInt()}°C',
+                            'Normal <${FishThresholds.normalMax.toInt()}°C',
                       ),
                     ),
-                    // Warning threshold line
+                    // Critical threshold line (5°C)
                     HorizontalLine(
                       y: FishThresholds.warningMax,
-                      color: AppColors.statusWarning.withValues(alpha: 0.7),
+                      color: AppColors.statusCritical.withValues(alpha: 0.7),
                       strokeWidth: 1.5,
                       dashArray: [6, 4],
                       label: HorizontalLineLabel(
@@ -141,11 +152,11 @@ class TemperatureChart extends StatelessWidget {
                         alignment: Alignment.topRight,
                         style: GoogleFonts.inter(
                           fontSize: 9,
-                          color: AppColors.statusWarning,
+                          color: AppColors.statusCritical,
                           fontWeight: FontWeight.w600,
                         ),
                         labelResolver: (_) =>
-                            'Warning ≤${FishThresholds.warningMax.toInt()}°C',
+                            'Critical ≥${FishThresholds.warningMax.toInt()}°C',
                       ),
                     ),
                   ],
@@ -161,12 +172,9 @@ class TemperatureChart extends StatelessWidget {
                     dotData: FlDotData(
                       show: spots.length <= 20,
                       getDotPainter: (spot, _, __, ___) {
-                        final temp = spot.y;
-                        final statusColor = temp <= FishThresholds.normalMax
-                            ? AppColors.statusNormal
-                            : temp <= FishThresholds.warningMax
-                                ? AppColors.statusWarning
-                                : AppColors.statusCritical;
+                        final statusColor = AppColors.statusColor(
+                          FishThresholds.computeStatus(spot.y),
+                        );
                         return FlDotCirclePainter(
                           radius: 3,
                           color: statusColor,

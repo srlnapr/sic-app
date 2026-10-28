@@ -129,25 +129,22 @@ class MonitoringScreen extends StatelessWidget {
                     _ThresholdRow(
                       color: AppColors.statusNormal,
                       label: 'Normal',
-                      description:
-                          '≤ ${FishThresholds.normalMax.toStringAsFixed(0)}°C',
-                      detail: 'Optimal storage temperature',
+                      description: FishThresholds.normalRange,
+                      detail: FishThresholds.normalDetail,
                     ),
                     const SizedBox(height: 10),
                     _ThresholdRow(
                       color: AppColors.statusWarning,
                       label: 'Warning',
-                      description:
-                          '> ${FishThresholds.normalMax.toStringAsFixed(0)}°C and ≤ ${FishThresholds.warningMax.toStringAsFixed(0)}°C',
-                      detail: 'Approaching critical range',
+                      description: FishThresholds.warningRange,
+                      detail: FishThresholds.warningDetail,
                     ),
                     const SizedBox(height: 10),
                     _ThresholdRow(
                       color: AppColors.statusCritical,
                       label: 'Critical',
-                      description:
-                          '> ${FishThresholds.warningMax.toStringAsFixed(0)}°C',
-                      detail: 'Immediate action required',
+                      description: FishThresholds.criticalRange,
+                      detail: FishThresholds.criticalDetail,
                     ),
                   ],
                 ),
@@ -313,10 +310,31 @@ class _ReadingRow extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Text(
-            '${(data.humidity as double).toStringAsFixed(0)}% RH',
+            '${(data.humidity as double).toStringAsFixed(1)}% RH',
             style: const TextStyle(
               fontSize: 12,
               color: AppColors.textMuted,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.statusBgColor(data.status as String),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: AppColors.statusBorderColor(data.status as String),
+                width: 0.8,
+              ),
+            ),
+            child: Text(
+              data.status as String,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: color,
+                letterSpacing: 0.3,
+              ),
             ),
           ),
           const Spacer(),

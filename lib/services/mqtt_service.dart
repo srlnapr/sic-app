@@ -1,13 +1,14 @@
 // ============================================================
 // mqtt_service.dart
-// MQTT Service - Flutter Web / Chrome
+// MQTT Service - Flutter Web / Chrome (WebSocket-compatible)
 // ============================================================
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_browser_client.dart';
+import 'mqtt/mqtt_client_factory.dart';
 
 // ============================================================
 // MQTT CONNECTION STATUS
@@ -17,6 +18,7 @@ enum MqttConnectionStatus {
   disconnected,
   connecting,
   connected,
+  reconnecting,
   error,
 }
 
@@ -34,7 +36,7 @@ typedef MqttMessageCallback = void Function(
 // ============================================================
 
 class MqttService {
-  MqttBrowserClient? _client;
+  MqttClient? _client;
 
   String _host;
   int _port;
@@ -48,52 +50,40 @@ class MqttService {
   // STATUS
   // ==========================================================
 
-  MqttConnectionStatus _status =
-      MqttConnectionStatus.disconnected;
-
+  MqttConnectionStatus _status = MqttConnectionStatus.disconnected;
   MqttConnectionStatus get status => _status;
 
   // ==========================================================
-  // STREAM
+  // STREAM CONTROLLERS
   // ==========================================================
 
-  final _statusController =
-      StreamController<MqttConnectionStatus>.broadcast();
+  final _statusController = StreamController<MqttConnectionStatus>.broadcast();
+  Stream<MqttConnectionStatus> get statusStream => _statusController.stream;
 
-  Stream<MqttConnectionStatus> get statusStream =>
-      _statusController.stream;
-
-  final _messageController =
-      StreamController<Map<String, String>>.broadcast();
-
-  Stream<Map<String, String>> get messageStream =>
-      _messageController.stream;
+  final _messageController = StreamController<Map<String, String>>.broadcast();
+  Stream<Map<String, String>> get messageStream => _messageController.stream;
 
   // ==========================================================
-  // CALLBACK
+  // CALLBACKS
   // ==========================================================
 
   MqttMessageCallback? onMessage;
-
   VoidCallback? onConnected;
-
   VoidCallback? onDisconnected;
 
   // ==========================================================
-  // RECONNECT
+  // RECONNECT & CONCURRENCY CONTROL
   // ==========================================================
 
-  bool _shouldReconnect = false;
-
+  bool _shouldReconnect = true;
+  bool _isConnecting = false;
   Timer? _reconnectTimer;
-
   int _reconnectAttempts = 0;
-
   StreamSubscription? _updatesSubscription;
+  final Set<String> _subscribedTopics = {};
 
-  static const int _maxReconnectAttempts = 10;
-
-  static const int _reconnectDelaySeconds = 5;
+  static const int _maxReconnectAttempts = 15;
+  static const int _baseReconnectDelaySeconds = 3;
 
   // ==========================================================
   // CONSTRUCTOR
@@ -124,16 +114,25 @@ class MqttService {
     String? password,
     String? topic,
   }) {
+    final bool hostChanged = host != null && host != _host;
+    final bool portChanged = port != null && port != _port;
+    final bool credentialsChanged =
+        (username != null && username != _username) ||
+        (password != null && password != _password);
+
     _host = host ?? _host;
-
     _port = port ?? _port;
-
     _username = username ?? _username;
-
     _password = password ?? _password;
 
     if (topic != null && topic != _topic) {
       updateTopic(topic);
+    }
+
+    // Reconnect if core connection details changed and currently connected
+    if ((hostChanged || portChanged || credentialsChanged) &&
+        _status == MqttConnectionStatus.connected) {
+      reconnect();
     }
   }
 
@@ -142,36 +141,24 @@ class MqttService {
   // ==========================================================
 
   void updateTopic(String newTopic) {
-    if (_topic == newTopic) {
+    final cleanNew = newTopic.trim();
+    if (cleanNew.isEmpty || cleanNew == _topic) {
       return;
     }
 
     final oldTopic = _topic;
+    _topic = cleanNew;
 
-    _topic = newTopic;
-
-    if (_client != null &&
-        _status == MqttConnectionStatus.connected) {
+    if (_client != null && _status == MqttConnectionStatus.connected) {
       try {
-        _client!.unsubscribe(oldTopic);
-
+        if (_subscribedTopics.contains(oldTopic) && oldTopic != _topic) {
+          _client!.unsubscribe(oldTopic);
+          _subscribedTopics.remove(oldTopic);
+        }
         _subscribeToTopic();
-
-        debugPrint(
-          'MQTT topic changed:',
-        );
-
-        debugPrint(
-          'Old topic: $oldTopic',
-        );
-
-        debugPrint(
-          'New topic: $newTopic',
-        );
+        debugPrint('MQTT topic switched from $oldTopic to $_topic');
       } catch (e) {
-        debugPrint(
-          'MQTT topic switch error: $e',
-        );
+        debugPrint('MQTT topic switch error: $e');
       }
     }
   }
@@ -180,15 +167,11 @@ class MqttService {
   // SET STATUS
   // ==========================================================
 
-  void _setStatus(
-    MqttConnectionStatus newStatus,
-  ) {
+  void _setStatus(MqttConnectionStatus newStatus) {
+    if (_status == newStatus) return;
     _status = newStatus;
-
     if (!_statusController.isClosed) {
-      _statusController.add(
-        newStatus,
-      );
+      _statusController.add(newStatus);
     }
   }
 
@@ -197,17 +180,15 @@ class MqttService {
   // ==========================================================
 
   Future<void> connect() async {
-    if (_status ==
-            MqttConnectionStatus.connecting ||
-        _status ==
-            MqttConnectionStatus.connected) {
+    if (_status == MqttConnectionStatus.connecting ||
+        _status == MqttConnectionStatus.connected ||
+        _isConnecting) {
+      debugPrint('MQTT connect called, but already connecting or connected.');
       return;
     }
 
     _shouldReconnect = true;
-
     _reconnectAttempts = 0;
-
     await _doConnect();
   }
 
@@ -216,46 +197,23 @@ class MqttService {
   // ==========================================================
 
   Future<void> _doConnect() async {
-    _setStatus(
-      MqttConnectionStatus.connecting,
-    );
+    if (_isConnecting) return;
+    _isConnecting = true;
+
+    // Cancel pending reconnect timer
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+
+    if (_status != MqttConnectionStatus.reconnecting) {
+      _setStatus(MqttConnectionStatus.connecting);
+    }
+
+    // Safely tear down previous client without triggering old disconnect callbacks
+    _teardownClient();
 
     try {
-      debugPrint(
-        '========================================',
-      );
-
-      debugPrint(
-        'MQTT CONNECTING',
-      );
-
-      debugPrint(
-        'Host: $_host',
-      );
-
-      debugPrint(
-        'Port: $_port',
-      );
-
-      debugPrint(
-        'Topic: $_topic',
-      );
-
-      debugPrint(
-        '========================================',
-      );
-
-      // Cancel existing reconnect timer & subscriptions
-      _reconnectTimer?.cancel();
-      _updatesSubscription?.cancel();
-
-      // Disconnect previous instance if any
-      try {
-        _client?.disconnect();
-      } catch (_) {}
-
       // ------------------------------------------------------
-      // CLEAN HOST & RESOLVE WEBSOCKET PARAMETERS FOR CHROME
+      // PARSE HOST & PORT
       // ------------------------------------------------------
       String cleanHost = _host.trim();
       cleanHost = cleanHost.replaceFirst(RegExp(r'^(wss?|https?):\/\/'), '');
@@ -267,22 +225,20 @@ class MqttService {
       }
 
       int effectivePort = _port;
-      // In Flutter Web, standard TCP port 1883 cannot be opened by browser.
-      // Use WebSocket port (8000 for public HiveMQ, 8884 for HiveMQ Cloud)
-      if (effectivePort == 1883 || effectivePort <= 0) {
-        effectivePort = cleanHost.contains('hivemq.cloud') ? 8884 : 8000;
+      if (kIsWeb) {
+        // In Flutter Web, standard TCP port 1883 cannot be opened by browser.
+        // Convert to WebSocket ports: 8000 for HiveMQ public (or 8884 for TLS)
+        if (effectivePort == 1883 || effectivePort <= 0) {
+          effectivePort = cleanHost.contains('hivemq.cloud') ? 8884 : 8000;
+        }
+      } else {
+        // Native mobile / desktop
+        if (effectivePort <= 0) {
+          effectivePort = cleanHost.contains('hivemq.cloud') ? 8883 : 1883;
+        }
       }
 
-      final bool isSecure = effectivePort == 8884 ||
-          effectivePort == 443 ||
-          cleanHost.contains('hivemq.cloud');
-
-      final String scheme = isSecure ? 'wss' : 'ws';
-      // In browser, MqttBrowserClient requires a URI with ws:// or wss:// scheme
-      // and explicit port and path: ws://broker.hivemq.com:8000/mqtt
-      final String wsUrl = '$scheme://$cleanHost:$effectivePort/mqtt';
-
-      // Unique client ID using configured clientId prefix (under 23 chars for broker compatibility)
+      // Unique client ID (under 23 characters for broker compatibility)
       final String prefix = _clientId.isNotEmpty ? _clientId : 'fg';
       final String cleanPrefix = prefix.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '');
       final String shortPrefix =
@@ -291,33 +247,29 @@ class MqttService {
           '${shortPrefix}_${DateTime.now().millisecondsSinceEpoch % 1000000}';
 
       debugPrint('========================================');
-      debugPrint('MQTT CONNECTING (Browser WebSocket)');
+      debugPrint('MQTT CONNECTING (${kIsWeb ? "Web WebSocket" : "Mobile/Native TCP/WS"})');
       debugPrint('Broker Host: $cleanHost');
       debugPrint('Port: $effectivePort');
-      debugPrint('WebSocket URI: $wsUrl');
       debugPrint('Client ID: $uniqueId');
-      debugPrint('Topic: $_topic');
+      debugPrint('Target Topic: $_topic');
       debugPrint('========================================');
 
-      _client = MqttBrowserClient.withPort(
-        wsUrl,
-        uniqueId,
-        effectivePort,
+      final client = MqttClientFactory.createClient(
+        host: cleanHost,
+        port: effectivePort,
+        clientId: uniqueId,
       );
 
-      _client!.port = effectivePort;
-      _client!.logging(on: false);
-      _client!.setProtocolV311();
-      _client!.keepAlivePeriod = 60;
-      _client!.connectTimeoutPeriod = 10000;
-      _client!.websocketProtocols =
-          MqttClientConstants.protocolsSingleDefault;
+      client.logging(on: false);
+      client.setProtocolV311();
+      client.keepAlivePeriod = 60;
+      client.connectTimeoutPeriod = 8000;
 
-      _client!.onConnected = _onConnectedCallback;
-      _client!.onDisconnected = _onDisconnected;
-      _client!.onSubscribed = _onSubscribed;
+      client.onConnected = _onConnectedCallback;
+      client.onDisconnected = _onDisconnected;
+      client.onSubscribed = _onSubscribed;
 
-      // Clean session connect message without invalid will flags
+      // Clean session connect message
       final connMessage = MqttConnectMessage()
           .withClientIdentifier(uniqueId)
           .startClean();
@@ -329,16 +281,20 @@ class MqttService {
         );
       }
 
-      _client!.connectionMessage = connMessage;
+      client.connectionMessage = connMessage;
+      _client = client;
 
-      await _client!.connect();
+      await client.connect();
 
       // ------------------------------------------------------
-      // CHECK CONNECTION
+      // CHECK CONNECTION STATUS
       // ------------------------------------------------------
-      if (_client!.connectionStatus?.state == MqttConnectionState.connected) {
-        _setStatus(MqttConnectionStatus.connected);
+      if (client.connectionStatus?.state == MqttConnectionState.connected) {
+        _isConnecting = false;
         _reconnectAttempts = 0;
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
+        _setStatus(MqttConnectionStatus.connected);
 
         debugPrint('========================================');
         debugPrint('MQTT CONNECTED SUCCESSFULLY (WebSocket)');
@@ -350,23 +306,33 @@ class MqttService {
         _listenToMessages();
         _subscribeToTopic();
       } else {
-        debugPrint(
-          'MQTT connection failed. Status: ${_client!.connectionStatus}',
-        );
+        _isConnecting = false;
+        debugPrint('MQTT connection failed. Status: ${client.connectionStatus}');
         _setStatus(MqttConnectionStatus.error);
         _scheduleReconnect();
       }
     } catch (e, stackTrace) {
-      debugPrint(
-        'MQTT CONNECTION ERROR: $e',
-      );
-      debugPrint(
-        'StackTrace: $stackTrace',
-      );
-      _setStatus(
-        MqttConnectionStatus.error,
-      );
+      _isConnecting = false;
+      debugPrint('MQTT CONNECTION ERROR: $e');
+      debugPrint('StackTrace: $stackTrace');
+      _setStatus(MqttConnectionStatus.error);
       _scheduleReconnect();
+    }
+  }
+
+  void _teardownClient() {
+    _updatesSubscription?.cancel();
+    _updatesSubscription = null;
+    _subscribedTopics.clear();
+
+    if (_client != null) {
+      try {
+        _client!.onDisconnected = null;
+        _client!.onConnected = null;
+        _client!.onSubscribed = null;
+        _client!.disconnect();
+      } catch (_) {}
+      _client = null;
     }
   }
 
@@ -380,17 +346,17 @@ class MqttService {
         return;
       }
 
-      final topics = <String>{
-        _topic.trim(),
+      final targetTopic = _topic.trim();
+      final topicsToSubscribe = <String>{
+        if (targetTopic.isNotEmpty) targetTopic,
         'fishguard/fsh001/sensor',
-        'fishguard/#',
-        'fishlogistics/#',
       };
 
-      for (final t in topics) {
-        if (t.isNotEmpty) {
-          debugPrint('MQTT SUBSCRIBED: $t');
+      for (final t in topicsToSubscribe) {
+        if (!_subscribedTopics.contains(t)) {
+          debugPrint('MQTT SUBSCRIBING: $t');
           _client!.subscribe(t, MqttQos.atLeastOnce);
+          _subscribedTopics.add(t);
         }
       }
     } catch (e) {
@@ -399,181 +365,117 @@ class MqttService {
   }
 
   // ==========================================================
-  // LISTEN TO MQTT MESSAGE
+  // LISTEN TO MQTT MESSAGES
   // ==========================================================
 
   void _listenToMessages() {
     _updatesSubscription?.cancel();
     _updatesSubscription = _client?.updates?.listen(
-      (
-        List<
-            MqttReceivedMessage<
-                MqttMessage>> messages,
-      ) {
+      (List<MqttReceivedMessage<MqttMessage>> messages) {
         for (final message in messages) {
-          final receivedMessage =
-              message.payload
-                  as MqttPublishMessage;
+          try {
+            final receivedMessage = message.payload as MqttPublishMessage;
+            final payload = MqttPublishPayload.bytesToStringAsString(
+              receivedMessage.payload.message,
+            );
 
-          final payload =
-              MqttPublishPayload
-                  .bytesToStringAsString(
-            receivedMessage
-                .payload
-                .message,
-          );
+            debugPrint('MQTT MESSAGE RECEIVED on ${message.topic}: $payload');
 
-          debugPrint(
-            '========================================',
-          );
+            // Send to broadcast stream
+            if (!_messageController.isClosed) {
+              _messageController.add({
+                'topic': message.topic,
+                'payload': payload,
+              });
+            }
 
-          debugPrint(
-            'MQTT MESSAGE RECEIVED',
-          );
-
-          debugPrint(
-            'Topic: ${message.topic}',
-          );
-
-          debugPrint(
-            'Payload: $payload',
-          );
-
-          debugPrint(
-            '========================================',
-          );
-
-          // Kirim ke stream
-          if (!_messageController
-              .isClosed) {
-            _messageController.add({
-              'topic': message.topic,
-              'payload': payload,
-            });
+            // Callback
+            onMessage?.call(message.topic, payload);
+          } catch (e) {
+            debugPrint('Error processing incoming MQTT message: $e');
           }
-
-          // Callback
-          onMessage?.call(
-            message.topic,
-            payload,
-          );
         }
+      },
+      onError: (err) {
+        debugPrint('MQTT message stream error: $err');
       },
     );
   }
 
   // ==========================================================
-  // ON CONNECTED
+  // CALLBACK HANDLERS
   // ==========================================================
 
   void _onConnectedCallback() {
-    debugPrint(
-      'MQTT onConnected callback fired',
-    );
+    debugPrint('MQTT onConnected callback fired');
   }
 
-  // ==========================================================
-  // ON DISCONNECTED
-  // ==========================================================
-
   void _onDisconnected() {
-    debugPrint(
-      'MQTT DISCONNECTED',
-    );
+    debugPrint('MQTT onDisconnected callback fired from broker');
+    _updatesSubscription?.cancel();
+    _updatesSubscription = null;
+    _subscribedTopics.clear();
 
-    _setStatus(
-      MqttConnectionStatus.disconnected,
-    );
+    if (_status != MqttConnectionStatus.disconnected &&
+        _status != MqttConnectionStatus.reconnecting) {
+      _setStatus(MqttConnectionStatus.disconnected);
+    }
 
     onDisconnected?.call();
 
-    _scheduleReconnect();
+    if (_shouldReconnect) {
+      _scheduleReconnect();
+    }
+  }
+
+  void _onSubscribed(String topic) {
+    debugPrint('MQTT SUBSCRIPTION CONFIRMED: $topic');
+    _subscribedTopics.add(topic);
   }
 
   // ==========================================================
-  // ON SUBSCRIBED
-  // ==========================================================
-
-  void _onSubscribed(
-    String topic,
-  ) {
-    debugPrint(
-      'MQTT SUBSCRIBED: $topic',
-    );
-  }
-
-  // ==========================================================
-  // RECONNECT
+  // RECONNECT WITH EXPONENTIAL BACKOFF
   // ==========================================================
 
   void _scheduleReconnect() {
-    if (!_shouldReconnect) {
-      return;
-    }
+    if (!_shouldReconnect) return;
 
-    if (_reconnectAttempts >=
-        _maxReconnectAttempts) {
-      debugPrint(
-        'MQTT max reconnect attempts reached',
-      );
-
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('MQTT max reconnect attempts reached ($_maxReconnectAttempts).');
+      _setStatus(MqttConnectionStatus.disconnected);
       return;
     }
 
     _reconnectTimer?.cancel();
+    _setStatus(MqttConnectionStatus.reconnecting);
 
-    final delaySeconds =
-        _reconnectDelaySeconds *
-            (_reconnectAttempts + 1)
-                .clamp(1, 5);
+    // Exponential backoff: 3s, 5s, 8s, 12s, up to 30s
+    final int delaySeconds = (_baseReconnectDelaySeconds *
+            math.pow(1.4, _reconnectAttempts).toInt())
+        .clamp(3, 30);
+    final delay = Duration(seconds: delaySeconds);
 
-    final delay = Duration(
-      seconds: delaySeconds,
-    );
+    debugPrint('MQTT reconnect scheduled in ${delay.inSeconds}s (attempt ${_reconnectAttempts + 1}/$_maxReconnectAttempts)');
 
-    debugPrint(
-      'MQTT reconnecting in '
-      '${delay.inSeconds}s '
-      '(attempt ${_reconnectAttempts + 1})',
-    );
-
-    _reconnectTimer = Timer(
-      delay,
-      () {
-        _reconnectAttempts++;
-
-        _doConnect();
-      },
-    );
+    _reconnectTimer = Timer(delay, () {
+      _reconnectAttempts++;
+      _doConnect();
+    });
   }
 
   // ==========================================================
   // PUBLISH
   // ==========================================================
 
-  void publish(
-    String topic,
-    String payload,
-  ) {
+  void publish(String topic, String payload) {
     if (_client == null ||
-        _client!
-                .connectionStatus
-                ?.state !=
-            MqttConnectionState.connected) {
-      debugPrint(
-        'MQTT not connected, cannot publish',
-      );
-
+        _client!.connectionStatus?.state != MqttConnectionState.connected) {
+      debugPrint('MQTT not connected, cannot publish');
       return;
     }
 
-    final builder =
-        MqttClientPayloadBuilder();
-
-    builder.addString(
-      payload,
-    );
-
+    final builder = MqttClientPayloadBuilder();
+    builder.addString(payload);
     _client!.publishMessage(
       topic,
       MqttQos.atLeastOnce,
@@ -587,18 +489,12 @@ class MqttService {
 
   Future<void> disconnect() async {
     _shouldReconnect = false;
-
     _reconnectTimer?.cancel();
-    _updatesSubscription?.cancel();
-    _updatesSubscription = null;
+    _reconnectTimer = null;
+    _isConnecting = false;
 
-    try {
-      _client?.disconnect();
-    } catch (_) {}
-
-    _setStatus(
-      MqttConnectionStatus.disconnected,
-    );
+    _teardownClient();
+    _setStatus(MqttConnectionStatus.disconnected);
   }
 
   // ==========================================================
@@ -607,11 +503,8 @@ class MqttService {
 
   Future<void> reconnect() async {
     await disconnect();
-
     _shouldReconnect = true;
-
     _reconnectAttempts = 0;
-
     await _doConnect();
   }
 
@@ -621,17 +514,13 @@ class MqttService {
 
   void dispose() {
     _shouldReconnect = false;
-
     _reconnectTimer?.cancel();
-    _updatesSubscription?.cancel();
-    _updatesSubscription = null;
+    _reconnectTimer = null;
+    _isConnecting = false;
 
-    try {
-      _client?.disconnect();
-    } catch (_) {}
+    _teardownClient();
 
     _statusController.close();
-
     _messageController.close();
   }
 }

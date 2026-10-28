@@ -11,6 +11,9 @@ class TelemetryData {
   final String status;
   final DateTime timestamp;
   final bool alarm;
+  final bool doorOpen;
+  final String alarmLevel;
+  final bool acknowledged;
 
   const TelemetryData({
     required this.shipmentId,
@@ -19,7 +22,12 @@ class TelemetryData {
     required this.status,
     required this.timestamp,
     this.alarm = false,
+    this.doorOpen = false,
+    this.alarmLevel = 'NORMAL',
+    this.acknowledged = false,
   });
+
+  String get temperatureStatus => status;
 
   static double _parseDouble(dynamic val, [double defaultVal = 0.0]) {
     if (val == null) return defaultVal;
@@ -49,19 +57,7 @@ class TelemetryData {
         json['val_hum'];
     final double hum = _parseDouble(rawHum, 0.0);
 
-    // 3. Status
-    final dynamic rawStatusVal = json['status'];
-    final String rawStatus = rawStatusVal != null ? rawStatusVal.toString().trim() : '';
-    final validStatuses = [
-      FishThresholds.statusNormal,
-      FishThresholds.statusWarning,
-      FishThresholds.statusCritical,
-    ];
-    final status = validStatuses.contains(rawStatus.toUpperCase())
-        ? rawStatus.toUpperCase()
-        : FishThresholds.computeStatus(temp);
-
-    // 4. Shipment ID: support 'shipment_id', 'shipmentId', 'id', 'deviceId', 'device_id'
+    // 3. Shipment ID: support 'shipment_id', 'shipmentId', 'id', 'deviceId', 'device_id'
     final dynamic rawShipmentId = json['shipment_id'] ??
         json['shipmentId'] ??
         json['id'] ??
@@ -71,13 +67,43 @@ class TelemetryData {
         ? rawShipmentId.toString().trim().toUpperCase()
         : (defaultShipmentId?.toUpperCase() ?? 'FSH001');
 
-    // 5. Alarm flag
+    // 4. Alarm flag
     final dynamic rawAlarm = json['alarm'];
     final bool alarm = rawAlarm is bool
         ? rawAlarm
         : (rawAlarm is num ? rawAlarm != 0 : (rawAlarm?.toString().toLowerCase() == 'true'));
 
-    // 6. Timestamp
+    // 5. Door Open flag
+    final dynamic rawDoor = json['door_open'] ?? json['doorOpen'] ?? json['door'];
+    final bool doorOpen = rawDoor is bool
+        ? rawDoor
+        : (rawDoor is num ? rawDoor != 0 : (rawDoor?.toString().toLowerCase() == 'true'));
+
+    // 6. Alarm Level from ESP32: 'NORMAL', 'WARNING', 'CRITICAL', 'DOOR_FILTER'
+    final dynamic rawAlarmLevel = json['alarm_level'] ?? json['alarmLevel'] ?? json['level'];
+    String? explicitAlarmLevel;
+    if (rawAlarmLevel != null && rawAlarmLevel.toString().trim().isNotEmpty) {
+      explicitAlarmLevel = rawAlarmLevel.toString().trim().toUpperCase();
+    }
+
+    // 7. Acknowledged flag
+    final dynamic rawAck = json['acknowledged'] ?? json['ack'];
+    final bool acknowledged = rawAck is bool
+        ? rawAck
+        : (rawAck is num ? rawAck != 0 : (rawAck?.toString().toLowerCase() == 'true'));
+
+    // 8. Status mapping:
+    // Physical temperature status is strictly calculated from the temperature threshold:
+    // - NORMAL:   temperature < 0°C
+    // - WARNING:  temperature >= 0°C and < 5°C
+    // - CRITICAL: temperature >= 5°C
+    // This ensures door filters or alarm booleans do not distort temperature classification.
+    final String tempStatus = FishThresholds.computeStatus(temp);
+
+    // Alarm level reflects the operational state from ESP32 (e.g. DOOR_FILTER, CRITICAL, WARNING, NORMAL)
+    final String finalAlarmLevel = explicitAlarmLevel ?? (alarm ? 'CRITICAL' : tempStatus);
+
+    // 9. Timestamp
     DateTime ts = DateTime.now();
     final dynamic rawTs = json['timestamp'] ?? json['time'] ?? json['ts'];
     if (rawTs != null) {
@@ -94,9 +120,12 @@ class TelemetryData {
       shipmentId: shipmentId,
       temperature: temp,
       humidity: hum,
-      status: status,
+      status: tempStatus,
       timestamp: ts,
       alarm: alarm,
+      doorOpen: doorOpen,
+      alarmLevel: finalAlarmLevel,
+      acknowledged: acknowledged,
     );
   }
 
@@ -138,6 +167,10 @@ class TelemetryData {
         humidity: h,
         status: FishThresholds.computeStatus(t),
         timestamp: DateTime.now(),
+        alarm: false,
+        doorOpen: false,
+        alarmLevel: 'NORMAL',
+        acknowledged: false,
       );
     }
 
@@ -150,6 +183,10 @@ class TelemetryData {
         humidity: 70.0,
         status: FishThresholds.computeStatus(singleNum),
         timestamp: DateTime.now(),
+        alarm: false,
+        doorOpen: false,
+        alarmLevel: 'NORMAL',
+        acknowledged: false,
       );
     }
 
@@ -178,6 +215,9 @@ class TelemetryData {
         'status': status,
         'timestamp': timestamp.toIso8601String(),
         'alarm': alarm,
+        'door_open': doorOpen,
+        'alarm_level': alarmLevel,
+        'acknowledged': acknowledged,
       };
 
   String toJsonString() => jsonEncode(toJson());
@@ -188,6 +228,9 @@ class TelemetryData {
     required double humidity,
     String shipmentId = 'FSH001',
     bool alarm = false,
+    bool doorOpen = false,
+    String alarmLevel = 'NORMAL',
+    bool acknowledged = false,
   }) {
     return TelemetryData(
       shipmentId: shipmentId,
@@ -196,6 +239,9 @@ class TelemetryData {
       status: FishThresholds.computeStatus(temperature),
       timestamp: DateTime.now(),
       alarm: alarm,
+      doorOpen: doorOpen,
+      alarmLevel: alarmLevel,
+      acknowledged: acknowledged,
     );
   }
 
@@ -206,6 +252,9 @@ class TelemetryData {
     String? status,
     DateTime? timestamp,
     bool? alarm,
+    bool? doorOpen,
+    String? alarmLevel,
+    bool? acknowledged,
   }) {
     return TelemetryData(
       shipmentId: shipmentId ?? this.shipmentId,
@@ -214,11 +263,15 @@ class TelemetryData {
       status: status ?? this.status,
       timestamp: timestamp ?? this.timestamp,
       alarm: alarm ?? this.alarm,
+      doorOpen: doorOpen ?? this.doorOpen,
+      alarmLevel: alarmLevel ?? this.alarmLevel,
+      acknowledged: acknowledged ?? this.acknowledged,
     );
   }
 
   @override
   String toString() =>
       'TelemetryData(shipmentId: $shipmentId, temp: $temperature, '
-      'humidity: $humidity, status: $status, alarm: $alarm, ts: $timestamp)';
+      'humidity: $humidity, status: $status, alarm: $alarm, doorOpen: $doorOpen, '
+      'alarmLevel: $alarmLevel, ack: $acknowledged, ts: $timestamp)';
 }

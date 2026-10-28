@@ -45,6 +45,13 @@ class MqttStatusIndicator extends StatelessWidget {
               label: showLabel ? 'Connecting...' : 'Connecting',
               animate: true,
             );
+          case MqttConnectionStatus.reconnecting:
+            return _buildChip(
+              color: AppColors.statusWarning,
+              icon: Icons.sync,
+              label: showLabel ? 'Reconnecting...' : 'Reconnecting',
+              animate: true,
+            );
           case MqttConnectionStatus.disconnected:
             return _buildChip(
               color: AppColors.statusCritical,

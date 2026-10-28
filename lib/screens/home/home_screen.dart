@@ -61,30 +61,33 @@ class HomeScreen extends StatelessWidget {
                                 size: 22,
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  AppConstants.appName,
-                                  style: GoogleFonts.inter(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.white,
-                                    letterSpacing: -0.5,
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    AppConstants.appName,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.white,
+                                      letterSpacing: -0.5,
+                                    ),
                                   ),
-                                ),
-                                Text(
-                                  AppConstants.appTagline,
-                                  style: GoogleFonts.inter(
-                                    fontSize: 11,
-                                    color: Colors.white70,
-                                    fontWeight: FontWeight.w400,
+                                  Text(
+                                    AppConstants.appTagline,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 11,
+                                      color: Colors.white70,
+                                      fontWeight: FontWeight.w400,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
-                            const Spacer(),
+                            const SizedBox(width: 8),
                             const MqttStatusIndicator(compact: true),
                           ],
                         ),
@@ -142,7 +145,7 @@ class HomeScreen extends StatelessWidget {
                   },
                 ),
 
-                // MQTT disconnected warning
+                // MQTT connection status banner
                 Consumer2<MqttProvider, TelemetryProvider>(
                   builder: (context, mqtt, telemetry, _) {
                     if (telemetry.isDemoMode) return const SizedBox.shrink();
@@ -150,26 +153,52 @@ class HomeScreen extends StatelessWidget {
                         MqttConnectionStatus.connected) {
                       return const SizedBox.shrink();
                     }
+
+                    final isReconnecting = mqtt.connectionStatus ==
+                        MqttConnectionStatus.reconnecting;
+                    final isConnecting = mqtt.connectionStatus ==
+                        MqttConnectionStatus.connecting;
+
+                    final bannerColor = (isConnecting || isReconnecting)
+                        ? AppColors.statusWarning
+                        : AppColors.statusCritical;
+                    final bannerBg = (isConnecting || isReconnecting)
+                        ? AppColors.statusWarningBg
+                        : AppColors.statusCriticalBg;
+                    final bannerBorder = (isConnecting || isReconnecting)
+                        ? AppColors.statusWarningBorder
+                        : AppColors.statusCriticalBorder;
+
+                    final bannerText = isReconnecting
+                        ? 'Reconnecting to MQTT broker...'
+                        : isConnecting
+                            ? 'Connecting to MQTT broker...'
+                            : 'MQTT Disconnected — Last data may be outdated';
+
+                    final iconData = isReconnecting
+                        ? Icons.sync
+                        : isConnecting
+                            ? Icons.wifi_find
+                            : Icons.wifi_off_rounded;
+
                     return Container(
                       margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: AppColors.statusCriticalBg,
+                        color: bannerBg,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: AppColors.statusCriticalBorder),
+                        border: Border.all(color: bannerBorder),
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.wifi_off_rounded,
-                              color: AppColors.statusCritical, size: 18),
+                          Icon(iconData, color: bannerColor, size: 18),
                           const SizedBox(width: 8),
-                          const Expanded(
+                          Expanded(
                             child: Text(
-                              'MQTT Disconnected — Last data may be outdated',
+                              bannerText,
                               style: TextStyle(
                                 fontSize: 12,
-                                color: AppColors.statusCritical,
+                                color: bannerColor,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
@@ -181,12 +210,12 @@ class HomeScreen extends StatelessWidget {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 10, vertical: 5),
                               decoration: BoxDecoration(
-                                color: AppColors.statusCritical,
+                                color: bannerColor,
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              child: const Text(
-                                'Reconnect',
-                                style: TextStyle(
+                              child: Text(
+                                isConnecting || isReconnecting ? 'Retry' : 'Reconnect',
+                                style: const TextStyle(
                                   fontSize: 11,
                                   color: Colors.white,
                                   fontWeight: FontWeight.w600,

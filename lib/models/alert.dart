@@ -3,6 +3,7 @@
 // ============================================================
 import 'dart:convert';
 import 'package:uuid/uuid.dart';
+import '../utils/thresholds.dart';
 
 const _uuid = Uuid();
 
@@ -36,8 +37,8 @@ class Alert {
         ? AlertSeverity.critical
         : AlertSeverity.warning;
     final message = status == 'CRITICAL'
-        ? 'Temperature has exceeded the configured critical threshold'
-        : 'Temperature is approaching the configured critical range';
+        ? 'Temperature reached critical threshold (${FishThresholds.criticalRange})'
+        : 'Temperature entered warning range (${FishThresholds.warningRange})';
     return Alert(
       severity: severity,
       message: message,

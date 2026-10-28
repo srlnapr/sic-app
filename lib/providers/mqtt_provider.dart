@@ -226,6 +226,8 @@ class MqttProvider extends ChangeNotifier {
         return 'CONNECTED';
       case MqttConnectionStatus.connecting:
         return 'CONNECTING';
+      case MqttConnectionStatus.reconnecting:
+        return 'RECONNECTING';
       case MqttConnectionStatus.disconnected:
         return 'DISCONNECTED';
       case MqttConnectionStatus.error:

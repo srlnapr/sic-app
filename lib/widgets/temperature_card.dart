@@ -16,10 +16,13 @@ class TemperatureCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<TelemetryProvider>(
       builder: (context, telemetry, _) {
-        final status = telemetry.currentStatus;
+        final hasData = telemetry.hasReceivedData;
+        final status = hasData ? telemetry.currentStatus : 'WAITING';
         final temp = telemetry.currentTemperature;
         final humidity = telemetry.currentHumidity;
         final lastUpdated = telemetry.latest?.timestamp;
+        final isDoorOpen = telemetry.isDoorOpen;
+        final alarmLevel = telemetry.currentAlarmLevel;
 
         final statusColor = AppColors.statusColor(status);
         final statusBg = AppColors.statusBgColor(status);
@@ -64,7 +67,7 @@ class TemperatureCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          temp.toStringAsFixed(1),
+                          hasData ? temp.toStringAsFixed(1) : '--.-',
                           style: GoogleFonts.inter(
                             fontSize: 64,
                             fontWeight: FontWeight.w700,
@@ -86,7 +89,7 @@ class TemperatureCard extends StatelessWidget {
                         ),
                         const Spacer(),
                         Icon(
-                          _getStatusIcon(status),
+                          hasData ? _getStatusIcon(status) : Icons.hourglass_empty_rounded,
                           size: 40,
                           color: statusColor.withValues(alpha: 0.8),
                         ),
@@ -95,12 +98,13 @@ class TemperatureCard extends StatelessWidget {
                     const SizedBox(height: 16),
                     const Divider(height: 1),
                     const SizedBox(height: 16),
+                    // Row 1: Humidity and Last updated
                     Row(
                       children: [
                         _MetricChip(
                           icon: Icons.water_drop_outlined,
                           label: 'Humidity',
-                          value: '${humidity.toStringAsFixed(0)}%',
+                          value: hasData ? '${humidity.toStringAsFixed(1)}% RH' : '--% RH',
                           color: AppColors.accent,
                         ),
                         const SizedBox(width: 12),
@@ -111,6 +115,37 @@ class TemperatureCard extends StatelessWidget {
                               ? DateFormat('HH:mm:ss').format(lastUpdated)
                               : '--:--:--',
                           color: AppColors.textMuted,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    // Row 2: Door Status and Alarm Level
+                    Row(
+                      children: [
+                        _MetricChip(
+                          icon: isDoorOpen
+                              ? Icons.meeting_room_outlined
+                              : Icons.door_front_door_outlined,
+                          label: 'Door Status',
+                          value: !hasData
+                              ? '--'
+                              : (isDoorOpen ? 'OPEN' : 'CLOSED'),
+                          color: !hasData
+                              ? AppColors.textMuted
+                              : (isDoorOpen
+                                  ? AppColors.statusCritical
+                                  : AppColors.statusNormal),
+                        ),
+                        const SizedBox(width: 12),
+                        _MetricChip(
+                          icon: Icons.shield_outlined,
+                          label: 'Alarm Level',
+                          value: !hasData
+                              ? '--'
+                              : alarmLevel,
+                          color: !hasData
+                              ? AppColors.textMuted
+                              : AppColors.statusColor(alarmLevel),
                         ),
                       ],
                     ),
@@ -132,6 +167,8 @@ class TemperatureCard extends StatelessWidget {
         return Icons.warning_amber_rounded;
       case 'CRITICAL':
         return Icons.error_outline_rounded;
+      case 'DOOR_FILTER':
+        return Icons.filter_alt_outlined;
       default:
         return Icons.device_thermostat;
     }
@@ -204,7 +241,7 @@ class _MetricChip extends StatelessWidget {
                   ),
                   Text(
                     value,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 13,
                       color: AppColors.textPrimary,
                       fontWeight: FontWeight.w600,

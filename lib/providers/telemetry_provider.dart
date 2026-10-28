@@ -45,9 +45,14 @@ class TelemetryProvider extends ChangeNotifier {
   Timer? _demoTimer;
 
   // Stats
+  bool get hasReceivedData => _latest != null;
   double get currentTemperature => _latest?.temperature ?? 0.0;
   double get currentHumidity => _latest?.humidity ?? 0.0;
   String get currentStatus => _latest?.status ?? 'UNKNOWN';
+  bool get isDoorOpen => _latest?.doorOpen ?? false;
+  String get currentAlarmLevel => _latest?.alarmLevel ?? 'NORMAL';
+  bool get isAlarmTriggered => _latest?.alarm ?? false;
+  bool get isAcknowledged => _latest?.acknowledged ?? false;
 
   double get minTemperature {
     if (_history.isEmpty) return 0.0;
@@ -118,12 +123,16 @@ class TelemetryProvider extends ChangeNotifier {
       _history.removeAt(0);
     }
 
-    // Auto-generate alert if status is WARNING/CRITICAL or alarm is triggered
-    if (FishThresholds.shouldAlert(data.status) || data.alarm) {
+    // Auto-generate alert if status is WARNING/CRITICAL or alarm is triggered,
+    // and it is NOT temporarily suppressed by DOOR_FILTER
+    final isSuppressedByDoor = data.alarmLevel == 'DOOR_FILTER';
+    if ((FishThresholds.shouldAlert(data.status) || data.alarm) && !isSuppressedByDoor) {
       _addAlertFromTelemetry(data);
-    } else {
-      // Resolve open alerts when status returns to NORMAL
-      _resolveOpenAlerts();
+    } else if (data.status == 'NORMAL' || isSuppressedByDoor) {
+      // Resolve open alerts when temperature returns to NORMAL and no alarm is active
+      if (data.status == 'NORMAL' && !data.alarm) {
+        _resolveOpenAlerts();
+      }
     }
 
     notifyListeners();

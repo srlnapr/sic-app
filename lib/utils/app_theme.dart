@@ -51,6 +51,8 @@ class AppColors {
         return statusWarning;
       case 'CRITICAL':
         return statusCritical;
+      case 'DOOR_FILTER':
+        return const Color(0xFF2563EB);
       default:
         return textMuted;
     }
@@ -64,6 +66,8 @@ class AppColors {
         return statusWarningBg;
       case 'CRITICAL':
         return statusCriticalBg;
+      case 'DOOR_FILTER':
+        return const Color(0xFFEFF6FF);
       default:
         return surfaceVariant;
     }
@@ -77,6 +81,8 @@ class AppColors {
         return statusWarningBorder;
       case 'CRITICAL':
         return statusCriticalBorder;
+      case 'DOOR_FILTER':
+        return const Color(0xFFBFDBFE);
       default:
         return divider;
     }
